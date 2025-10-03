@@ -4,7 +4,7 @@ import streamlit as st
 from pptx import Presentation
 
 # ---------- PAGE CONFIG (must be first st.* call) ----------
-st.set_page_config(page_title="Initiatives Slide Filler", page_icon="🧩", layout="centered")
+st.set_page_config(page_title="Outcome Based Success Plans", page_icon="🧩", layout="centered")
 
 # ---------- OPENAI WRAPPER ----------
 def call_llm(system, user, model):
