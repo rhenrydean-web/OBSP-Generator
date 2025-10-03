@@ -166,8 +166,8 @@ def fill_initiatives_table(prs, initiatives, table_name="INIT_TABLE"):
 
     return True
 
-# ---------- TABLE POST-FORMATTING (autoshrink, widths, padding) ----------
-from pptx.util import Inches, Pt
+# ---------- TABLE POST-FORMATTING (autoshrink, widths, padding, resize-to-slide) ----------
+from pptx.util import Inches, Pt, Emu
 from pptx.enum.text import MSO_AUTO_SIZE, MSO_ANCHOR
 
 def _set_col_widths(tbl, widths_in_inches):
@@ -175,43 +175,91 @@ def _set_col_widths(tbl, widths_in_inches):
         if i < len(tbl.columns):
             tbl.columns[i].width = Inches(w)
 
-def _format_cell_textframe(tf, max_pt=14):
+def _apply_text_autofit(tf, start_pt=13):
+    # Enable wrap + try native autosize
     tf.word_wrap = True
     try:
         tf.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
     except Exception:
-        pass  # some themes disallow; safe to ignore
+        pass
+    # Tight spacing + reasonable starting size
+    for p in tf.paragraphs:
+        p.line_spacing = 1.0
+        p.space_before = Pt(0)
+        p.space_after = Pt(0)
+        for r in p.runs:
+            r.font.size = Pt(start_pt)
+
+def _fallback_shrink(tf, hard_min_pt=9):
+    # Deterministic shrink if theme blocks autosize
+    text_len = len(tf.text or "")
+    if text_len <= 80:
+        target = 13
+    elif text_len <= 140:
+        target = 12
+    elif text_len <= 200:
+        target = 11
+    elif text_len <= 260:
+        target = 10
+    else:
+        target = hard_min_pt
     for p in tf.paragraphs:
         for r in p.runs:
-            r.font.size = Pt(max_pt)
+            r.font.size = Pt(target)
 
-def pretty_format_init_table(table_shape, max_pt=14, widths=None):
+def _resize_table_to_slide(prs, table_shape, horiz_margin_in=0.5):
     """
-    Apply autoshrink, wrap, padding, vertical centering, and column width normalization to INIT_TABLE.
+    Snap the table to slide width with left/right margins.
+    If table is inside a group, attempt to resize the group.
+    """
+    target_width = prs.slide_width - Inches(horiz_margin_in * 2)
+    try:
+        table_shape.left = Inches(horiz_margin_in)
+        table_shape.width = target_width
+    except Exception:
+        # Try parent group if direct resize is blocked
+        try:
+            parent = table_shape._parent
+            if hasattr(parent, "left") and hasattr(parent, "width"):
+                parent.left = Inches(horiz_margin_in)
+                parent.width = target_width
+        except Exception:
+            pass
+
+def pretty_format_init_table(prs, table_shape, max_pt=13, widths=None):
+    """
+    Normalize widths, padding, vertical alignment, autoshrink text,
+    and resize the table to fit the slide.
     """
     tbl = table_shape.table
-    # Default widths: Initiative | Step | Success criteria | Owner | Target | Status
-    widths = widths or [2.2, 1.8, 3.3, 1.4, 1.2, 1.2]  # inches
+
+    # 0) Resize the table (or its group) to slide width
+    _resize_table_to_slide(prs, table_shape, horiz_margin_in=0.5)
+
+    # 1) Column widths — give more room to Initiative & Success criteria
+    widths = widths or [2.2, 1.8, 3.4, 1.4, 1.2, 1.2]  # inches
     _set_col_widths(tbl, widths)
 
+    # 2) Cell formatting: padding, vertical centering, text autofit + fallback
     for r in range(len(tbl.rows)):
         for c in range(len(tbl.columns)):
             cell = tbl.cell(r, c)
             try:
                 # modest padding
-                cell.margin_left = Pt(3)
-                cell.margin_right = Pt(3)
-                cell.margin_top = Pt(2)
-                cell.margin_bottom = Pt(2)
+                cell.margin_left = Pt(2)
+                cell.margin_right = Pt(2)
+                cell.margin_top = Pt(1)
+                cell.margin_bottom = Pt(1)
                 cell.vertical_anchor = MSO_ANCHOR.MIDDLE
             except Exception:
                 pass
             if cell.text_frame:
-                _format_cell_textframe(cell.text_frame, max_pt=max_pt)
+                _apply_text_autofit(cell.text_frame, start_pt=max_pt)
+                _fallback_shrink(cell.text_frame, hard_min_pt=9)
 
 # ---------- UI ----------
 st.markdown("## 🧩 Initiatives Slide Filler")
-st.caption("Upload your PPT template (with a 6-col table named INIT_TABLE), upload context (QBR/notes), and I’ll auto-fill 3 initiatives × 3 steps — with autoshrink formatting.")
+st.caption("Upload your PPT template (with a 6-col table named INIT_TABLE), upload context (QBR/notes), and I’ll auto-fill 3 initiatives × 3 steps — with autoshrink and slide-fit formatting.")
 
 with st.form("form"):
     col1, col2 = st.columns(2)
@@ -322,10 +370,10 @@ Relevant uploaded excerpts (paraphrase succinctly):
         st.error("Could not find/fill the table. Check it's named 'INIT_TABLE', has 6 columns, and enough rows (the app will add rows if needed).")
         st.stop()
 
-    # Beautify the table (autoshrink / widths / padding)
+    # Beautify the table (autoshrink / widths / padding / resize-to-slide)
     shp = _find_table(prs, "INIT_TABLE")
     if shp is not None and hasattr(shp, "table"):
-        pretty_format_init_table(shp, max_pt=14, widths=[2.2, 1.8, 3.3, 1.4, 1.2, 1.2])
+        pretty_format_init_table(prs, shp, max_pt=13, widths=[2.2, 1.8, 3.4, 1.4, 1.2, 1.2])
 
     # Save+download
     buf = io.BytesIO()
