@@ -60,9 +60,15 @@ def pick_top_snippets(texts, query, k=8):
     scored.sort(key=lambda x: x[1], reverse=True)
     return [c for c, s in scored[:k] if s > 40]
 
-# ---------- TABLE FILL HELPERS ----------
+# ---------- SMALL UTIL ----------
+def _ellipsize(text, max_chars=120):
+    t = (text or "").strip()
+    return (t[:max_chars-1] + "…") if len(t) > max_chars else t
+
+# ---------- TABLE FIND & FILL HELPERS ----------
 def _find_table(prs, table_name="INIT_TABLE"):
-    # 1) By exact shape name
+    """Find table by name; if not found, try header match."""
+    # 1) By exact shape name (including inside groups)
     for slide in prs.slides:
         for sh in slide.shapes:
             if getattr(sh, "name", "") == table_name and hasattr(sh, "table"):
@@ -71,7 +77,7 @@ def _find_table(prs, table_name="INIT_TABLE"):
                 for s in sh.shapes:
                     if getattr(s, "name", "") == table_name and hasattr(s, "table"):
                         return s
-    # 2) Fallback by header match
+    # 2) Fallback by header row
     expected_headers = ["Initiative","Step","Success criteria","Owner","Target","Status"]
     for slide in prs.slides:
         for sh in slide.shapes:
@@ -84,7 +90,7 @@ def _find_table(prs, table_name="INIT_TABLE"):
     return None
 
 def _ensure_min_rows(tbl, min_rows=10):
-    # Add rows at the bottom until we have min_rows total
+    # Add rows until there are min_rows total (header + data)
     while len(tbl.rows) < min_rows:
         tbl.add_row()
 
@@ -104,11 +110,10 @@ def fill_initiatives_table(prs, initiatives, table_name="INIT_TABLE"):
         return False
     _ensure_min_rows(tbl, 10)
 
-    # Validate initiatives shape
     if len(initiatives) != 3:
         return False
 
-    # Clear data rows (1..end) in all 6 columns (ignore merged quirks; top-left cell keeps text)
+    # Clear data rows (row 1..end)
     for r in range(1, len(tbl.rows)):
         for c in range(6):
             try:
@@ -116,26 +121,25 @@ def fill_initiatives_table(prs, initiatives, table_name="INIT_TABLE"):
             except:
                 pass
 
-    # Fill rows
+    # Fill rows: 3 initiatives × 3 steps
     row_idx = 1
     for init in initiatives:
-        name = init.get("name","")
-        crit = init.get("success_criteria","")
+        name = _ellipsize(init.get("name",""), 70)
+        crit = _ellipsize(init.get("success_criteria",""), 220)
         steps = (init.get("steps") or [])[:3]
         if len(steps) < 3:
             steps += [{"name":"TBD","owner":"TBD","target":"TBD","status":"not started"}] * (3 - len(steps))
 
         start = row_idx
         for step in steps:
-            # Step
-            try: tbl.cell(row_idx, 1).text = step.get("name","")
+            # Step, Owner, Target, Status
+            try: tbl.cell(row_idx, 1).text = _ellipsize(step.get("name",""), 120)
             except: pass
-            # Owner / Target / Status
-            try: tbl.cell(row_idx, 3).text = step.get("owner","")
+            try: tbl.cell(row_idx, 3).text = _ellipsize(step.get("owner",""), 60)
             except: pass
-            try: tbl.cell(row_idx, 4).text = step.get("target","")
+            try: tbl.cell(row_idx, 4).text = _ellipsize(step.get("target",""), 30)
             except: pass
-            try: tbl.cell(row_idx, 5).text = step.get("status","not started")
+            try: tbl.cell(row_idx, 5).text = _ellipsize(step.get("status","not started"), 30)
             except: pass
             row_idx += 1
         end = row_idx - 1
@@ -162,10 +166,52 @@ def fill_initiatives_table(prs, initiatives, table_name="INIT_TABLE"):
 
     return True
 
+# ---------- TABLE POST-FORMATTING (autoshrink, widths, padding) ----------
+from pptx.util import Inches, Pt
+from pptx.enum.text import MSO_AUTO_SIZE, MSO_ANCHOR
+
+def _set_col_widths(tbl, widths_in_inches):
+    for i, w in enumerate(widths_in_inches):
+        if i < len(tbl.columns):
+            tbl.columns[i].width = Inches(w)
+
+def _format_cell_textframe(tf, max_pt=14):
+    tf.word_wrap = True
+    try:
+        tf.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+    except Exception:
+        pass  # some themes disallow; safe to ignore
+    for p in tf.paragraphs:
+        for r in p.runs:
+            r.font.size = Pt(max_pt)
+
+def pretty_format_init_table(table_shape, max_pt=14, widths=None):
+    """
+    Apply autoshrink, wrap, padding, vertical centering, and column width normalization to INIT_TABLE.
+    """
+    tbl = table_shape.table
+    # Default widths: Initiative | Step | Success criteria | Owner | Target | Status
+    widths = widths or [2.2, 1.8, 3.3, 1.4, 1.2, 1.2]  # inches
+    _set_col_widths(tbl, widths)
+
+    for r in range(len(tbl.rows)):
+        for c in range(len(tbl.columns)):
+            cell = tbl.cell(r, c)
+            try:
+                # modest padding
+                cell.margin_left = Pt(3)
+                cell.margin_right = Pt(3)
+                cell.margin_top = Pt(2)
+                cell.margin_bottom = Pt(2)
+                cell.vertical_anchor = MSO_ANCHOR.MIDDLE
+            except Exception:
+                pass
+            if cell.text_frame:
+                _format_cell_textframe(cell.text_frame, max_pt=max_pt)
 
 # ---------- UI ----------
 st.markdown("## 🧩 Initiatives Slide Filler")
-st.caption("Upload your PPT template (with a 6-col table named INIT_TABLE), upload context (QBR/notes), and I’ll auto-fill 3 initiatives × 3 steps.")
+st.caption("Upload your PPT template (with a 6-col table named INIT_TABLE), upload context (QBR/notes), and I’ll auto-fill 3 initiatives × 3 steps — with autoshrink formatting.")
 
 with st.form("form"):
     col1, col2 = st.columns(2)
@@ -190,7 +236,7 @@ with st.form("form"):
     )
 
     model = st.selectbox("Model", ["gpt-4o-mini","gpt-4o","gpt-4-turbo","gpt-3.5-turbo"], index=0)
-    submitted = st.form_submit_button("Generate Initiatives & Fill Slide")
+    submitted = st.form_submit_button("Generate & Fill Slide")
 
 if submitted:
     # Require a template
@@ -273,13 +319,18 @@ Relevant uploaded excerpts (paraphrase succinctly):
     # Fill the table
     ok = fill_initiatives_table(prs, data.get("initiatives", []), table_name="INIT_TABLE")
     if not ok:
-        st.error("Could not find/fill the table. Check it's named 'INIT_TABLE', has 6 columns, and 10 rows (header + 9).")
+        st.error("Could not find/fill the table. Check it's named 'INIT_TABLE', has 6 columns, and enough rows (the app will add rows if needed).")
         st.stop()
+
+    # Beautify the table (autoshrink / widths / padding)
+    shp = _find_table(prs, "INIT_TABLE")
+    if shp is not None and hasattr(shp, "table"):
+        pretty_format_init_table(shp, max_pt=14, widths=[2.2, 1.8, 3.3, 1.4, 1.2, 1.2])
 
     # Save+download
     buf = io.BytesIO()
     prs.save(buf); buf.seek(0)
-    st.success("Slide filled!")
+    st.success("Slide filled and formatted!")
     st.download_button(
         "⬇️ Download Updated PowerPoint",
         buf,
