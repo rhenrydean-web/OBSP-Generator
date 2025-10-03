@@ -62,7 +62,6 @@ def pick_top_snippets(texts, query, k=8):
 
 # ---------- TABLE FILL HELPERS ----------
 def _find_table(prs, table_name="INIT_TABLE"):
-    """Find table by name; if not found, try header match."""
     # 1) By exact shape name
     for slide in prs.slides:
         for sh in slide.shapes:
@@ -84,60 +83,85 @@ def _find_table(prs, table_name="INIT_TABLE"):
                         return sh
     return None
 
+def _ensure_min_rows(tbl, min_rows=10):
+    # Add rows at the bottom until we have min_rows total
+    while len(tbl.rows) < min_rows:
+        tbl.add_row()
+
 def fill_initiatives_table(prs, initiatives, table_name="INIT_TABLE"):
     """
-    Fills a 6-col table with 9 rows (+ header) for 3 initiatives × 3 steps.
+    Fill a 6-col table with 9 rows (+ header) for 3 initiatives × 3 steps.
     Columns: [Initiative, Step, Success criteria, Owner, Target, Status]
-    Merges Initiative & Success criteria cells across each 3-row block if possible.
+    Tolerates pre-merged cells and will add rows if the grid is short.
     """
     shp = _find_table(prs, table_name)
     if shp is None or not hasattr(shp, "table"):
         return False
     tbl = shp.table
 
-    # Basic checks
-    if len(tbl.columns) < 6 or len(tbl.rows) < 10:
+    # Ensure 6 columns and at least 10 rows in the GRID
+    if len(tbl.columns) < 6:
         return False
+    _ensure_min_rows(tbl, 10)
+
+    # Validate initiatives shape
     if len(initiatives) != 3:
         return False
 
-    # Clear data rows
+    # Clear data rows (1..end) in all 6 columns (ignore merged quirks; top-left cell keeps text)
     for r in range(1, len(tbl.rows)):
         for c in range(6):
-            tbl.cell(r, c).text = ""
+            try:
+                tbl.cell(r, c).text = ""
+            except:
+                pass
 
+    # Fill rows
     row_idx = 1
     for init in initiatives:
         name = init.get("name","")
         crit = init.get("success_criteria","")
-        steps = init.get("steps", [])[:3]
+        steps = (init.get("steps") or [])[:3]
         if len(steps) < 3:
             steps += [{"name":"TBD","owner":"TBD","target":"TBD","status":"not started"}] * (3 - len(steps))
 
         start = row_idx
         for step in steps:
-            tbl.cell(row_idx, 1).text = step.get("name","")
-            tbl.cell(row_idx, 3).text = step.get("owner","")
-            tbl.cell(row_idx, 4).text = step.get("target","")
-            tbl.cell(row_idx, 5).text = step.get("status","not started")
+            # Step
+            try: tbl.cell(row_idx, 1).text = step.get("name","")
+            except: pass
+            # Owner / Target / Status
+            try: tbl.cell(row_idx, 3).text = step.get("owner","")
+            except: pass
+            try: tbl.cell(row_idx, 4).text = step.get("target","")
+            except: pass
+            try: tbl.cell(row_idx, 5).text = step.get("status","not started")
+            except: pass
             row_idx += 1
         end = row_idx - 1
 
-        # Merge & fill Initiative
+        # Initiative (merge rows start..end in col 0 if possible)
         try:
             tbl.cell(start, 0).merge(tbl.cell(end, 0))
-        except:  # already merged or not supported
+        except:
             pass
-        tbl.cell(start, 0).text = name
+        try:
+            tbl.cell(start, 0).text = name
+        except:
+            pass
 
-        # Merge & fill Success criteria
+        # Success criteria (merge rows start..end in col 2 if possible)
         try:
             tbl.cell(start, 2).merge(tbl.cell(end, 2))
         except:
             pass
-        tbl.cell(start, 2).text = crit
+        try:
+            tbl.cell(start, 2).text = crit
+        except:
+            pass
 
     return True
+
 
 # ---------- UI ----------
 st.markdown("## 🧩 Initiatives Slide Filler")
