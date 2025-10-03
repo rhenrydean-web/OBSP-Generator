@@ -4,6 +4,78 @@ from pptx import Presentation
 from pptx.util import Pt
 from pptx.dml.color import RGBColor
 
+from pypdf import PdfReader
+from docx import Document as DocxDocument
+from sklearn.feature_extraction.text import TfidfVectorizer
+
+def extract_text_from_file(f):
+    name = (f.name or "").lower()
+    if name.endswith(".pdf"):
+        reader = PdfReader(f)
+        pages = min(len(reader.pages), 25)  # cap to 25 pages for speed/cost
+        return "\n\n".join((reader.pages[i].extract_text() or "") for i in range(pages))
+    elif name.endswith(".docx"):
+        d = DocxDocument(f)
+        return "\n".join(p.text for p in d.paragraphs)
+    else:  # .txt
+        return f.read().decode(errors="ignore")
+
+def chunk_text(txt, chunk_size=800, overlap=120):
+    txt = " ".join(txt.split())
+    chunks, i = [], 0
+    while i < len(txt):
+        chunks.append(txt[i:i+chunk_size])
+        i += chunk_size - overlap
+    return chunks
+
+def pick_top_snippets(texts, query, k=8):
+    chunks = []
+    for t in texts:
+        chunks.extend(chunk_text(t))
+    if not chunks:
+        return []
+    vec = TfidfVectorizer(stop_words="english").fit(chunks + [query])
+    X = vec.transform(chunks); q = vec.transform([query])
+    scores = (X * q.T).toarray().ravel()
+    top_idx = scores.argsort()[::-1][:k]
+    return [chunks[i] for i in top_idx if scores[i] > 0]
+from pypdf import PdfReader
+from docx import Document as DocxDocument
+from sklearn.feature_extraction.text import TfidfVectorizer
+
+def extract_text_from_file(f):
+    name = (f.name or "").lower()
+    if name.endswith(".pdf"):
+        reader = PdfReader(f)
+        pages = min(len(reader.pages), 25)  # cap to 25 pages for speed/cost
+        return "\n\n".join((reader.pages[i].extract_text() or "") for i in range(pages))
+    elif name.endswith(".docx"):
+        d = DocxDocument(f)
+        return "\n".join(p.text for p in d.paragraphs)
+    else:  # .txt
+        return f.read().decode(errors="ignore")
+
+def chunk_text(txt, chunk_size=800, overlap=120):
+    txt = " ".join(txt.split())
+    chunks, i = [], 0
+    while i < len(txt):
+        chunks.append(txt[i:i+chunk_size])
+        i += chunk_size - overlap
+    return chunks
+
+def pick_top_snippets(texts, query, k=8):
+    chunks = []
+    for t in texts:
+        chunks.extend(chunk_text(t))
+    if not chunks:
+        return []
+    vec = TfidfVectorizer(stop_words="english").fit(chunks + [query])
+    X = vec.transform(chunks); q = vec.transform([query])
+    scores = (X * q.T).toarray().ravel()
+    top_idx = scores.argsort()[::-1][:k]
+    return [chunks[i] for i in top_idx if scores[i] > 0]
+
+
 # ---------- PAGE CONFIG MUST BE FIRST STREAMLIT CALL ----------
 st.set_page_config(page_title="OBSP Generator", page_icon="📘", layout="centered")
 
@@ -91,11 +163,73 @@ with st.form("obsp"):
     stakeholders = st.text_area("Stakeholders", "Customer: Exec Sponsor, Admin, Champions; Vendor: CSM, SE, Support")
     risks = st.text_area("Known Risks", "Low admin bandwidth; End-user training gaps")
 
+uploads = st.file_uploader(
+    "Upload context files (QBRs, notes, SOWs) — PDF, DOCX, or TXT (optional)",
+    type=["pdf","docx","txt"], accept_multiple_files=True
+)
+
+ppt_template = st.file_uploader(
+    "Optional: Upload a PowerPoint template (.pptx) to apply your brand/theme",
+    type=["pptx"], accept_multiple_files=False
+)
+uploads = st.file_uploader(
+    "Upload context files (QBRs, notes, SOWs) — PDF, DOCX, or TXT (optional)",
+    type=["pdf","docx","txt"], accept_multiple_files=True
+)
+
+ppt_template = st.file_uploader(
+    "Optional: Upload a PowerPoint template (.pptx) to apply your brand/theme",
+    type=["pptx"], accept_multiple_files=False
+)
+
+    
     model = st.selectbox("Model", ["gpt-4o-mini","gpt-4o","gpt-4-turbo","gpt-3.5-turbo"], index=0)
     submitted = st.form_submit_button("Generate Plan")
 
 if submitted:
     system = "You output STRICT JSON for customer success plans. No markdown, no extra prose."
+  # Build a relevance query from the form fields
+query = f"""
+{customer} {industry} {arr} {horizon}
+Objectives: {objectives}
+Baselines: {baselines}
+Constraints: {constraints}
+Stakeholders: {stakeholders}
+Risks: {risks}
+"""
+
+# Read files and pick top snippets
+all_texts = []
+for f in (uploads or []):
+    try:
+        all_texts.append(extract_text_from_file(f))
+    except Exception:
+        pass
+
+snippets = pick_top_snippets(all_texts, query, k=8)
+context_blob = "\n\n---\n\n".join(snippets)[:8000]  # cap size to keep tokens reasonable
+# Build a relevance query from the form fields
+query = f"""
+{customer} {industry} {arr} {horizon}
+Objectives: {objectives}
+Baselines: {baselines}
+Constraints: {constraints}
+Stakeholders: {stakeholders}
+Risks: {risks}
+"""
+
+# Read files and pick top snippets
+all_texts = []
+for f in (uploads or []):
+    try:
+        all_texts.append(extract_text_from_file(f))
+    except Exception:
+        pass
+
+snippets = pick_top_snippets(all_texts, query, k=8)
+context_blob = "\n\n---\n\n".join(snippets)[:8000]  # cap size to keep tokens reasonable
+
+    
     user = f"""
 JSON schema:
 {{
@@ -115,6 +249,9 @@ JSON schema:
 }}
 
 Context:
+Relevant Context (use when helpful; quote or paraphrase succinctly):
+{context_blob}
+
 Customer: {customer}
 Industry: {industry}
 ARR Segment: {arr}
@@ -133,7 +270,27 @@ Known Risks: {risks}
         st.stop()
 
     # ---------- Build PPT ----------
+
+
+# OLD:
+# prs = Presentation()
+
+# NEW:
+from pptx import Presentation
+if ppt_template is not None:
+    prs = Presentation(ppt_template)
+else:
     prs = Presentation()
+# OLD:
+# prs = Presentation()
+
+# NEW:
+from pptx import Presentation
+if ppt_template is not None:
+    prs = Presentation(ppt_template)
+else:
+    prs = Presentation()
+
 
     # Title
     s = prs.slides.add_slide(prs.slide_layouts[0])
