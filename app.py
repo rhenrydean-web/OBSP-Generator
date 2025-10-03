@@ -1,71 +1,15 @@
 # app.py
-import io, os, json
+import io, json
 import streamlit as st
 from pptx import Presentation
-from pptx.util import Pt
-from pptx.dml.color import RGBColor
 
-# ---------- PAGE CONFIG ----------
-st.set_page_config(page_title="OBSP Generator (Robust)", page_icon="📘", layout="centered")
+# ---------- PAGE CONFIG (must be first st.* call) ----------
+st.set_page_config(page_title="Initiatives Slide Filler", page_icon="🧩", layout="centered")
 
-PRIMARY = RGBColor(30, 64, 175)   # deep blue
-BODY_SIZE = 18
-TITLE_SIZE = 36
-
-# ---------- UI HELPERS ----------
-def add_title(slide, text):
-    title = slide.shapes.title
-    title.text = text
-    p = title.text_frame.paragraphs[0]
-    p.font.size = Pt(TITLE_SIZE); p.font.bold = True; p.font.color.rgb = PRIMARY
-
-def add_body(slide, text):
-    ph = slide.placeholders[1]
-    ph.text = text
-    for p in ph.text_frame.paragraphs:
-        p.font.size = Pt(BODY_SIZE)
-
-def add_bullets(slide, lines):
-    tf = slide.placeholders[1].text_frame
-    tf.clear()
-    for i, line in enumerate([l for l in lines if l.strip()]):
-        p = tf.add_paragraph() if i else tf.paragraphs[0]
-        p.text = line.strip(); p.level = 0; p.font.size = Pt(BODY_SIZE)
-
-def add_two_col_table(slide, left_title, left_items, right_title, right_items):
-    rows = max(len(left_items), len(right_items)) + 1
-    table = slide.shapes.add_table(rows, 2, Pt(20), Pt(120), Pt(900), Pt(360)).table
-    table.cell(0,0).text, table.cell(0,1).text = left_title, right_title
-    for j in (0,1):
-        p = table.cell(0,j).text_frame.paragraphs[0]
-        p.font.bold = True; p.font.size = Pt(BODY_SIZE)
-    for i in range(1, rows):
-        table.cell(i,0).text = left_items[i-1] if i-1 < len(left_items) else ""
-        table.cell(i,1).text = right_items[i-1] if i-1 < len(right_items) else ""
-
-def add_kpi_table(slide, kpis):
-    rows, cols = len(kpis)+1, 5
-    table = slide.shapes.add_table(rows, cols, Pt(20), Pt(120), Pt(900), Pt(360)).table
-    headers = ["Metric","Baseline","Target","Cadence","Owner"]
-    for j,h in enumerate(headers):
-        c = table.cell(0,j); c.text = h
-        p = c.text_frame.paragraphs[0]; p.font.bold = True; p.font.size = Pt(BODY_SIZE)
-    for i,k in enumerate(kpis, start=1):
-        table.cell(i,0).text = k.get("metric","")
-        table.cell(i,1).text = k.get("baseline","")
-        table.cell(i,2).text = k.get("target","")
-        table.cell(i,3).text = k.get("cadence","")
-        table.cell(i,4).text = k.get("owner","")
-
-def extract_json(raw: str):
-    start = raw.find("{"); end = raw.rfind("}")
-    if start == -1 or end == -1:
-        raise ValueError("No JSON object found in LLM response.")
-    return json.loads(raw[start:end+1])
-
+# ---------- OPENAI WRAPPER ----------
 def call_llm(system, user, model):
     if "OPENAI_API_KEY" not in st.secrets or not st.secrets["OPENAI_API_KEY"]:
-        raise RuntimeError("Missing OPENAI_API_KEY secret. Add it in Streamlit Cloud → App → Settings → Secrets.")
+        raise RuntimeError("Missing OPENAI_API_KEY secret. Add it in Streamlit → Manage app → Settings → Secrets.")
     from openai import OpenAI
     client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
     resp = client.chat.completions.create(
@@ -75,7 +19,13 @@ def call_llm(system, user, model):
     )
     return resp.choices[0].message.content
 
-# ---------- Context extraction (lightweight) ----------
+def extract_json(raw: str):
+    start = raw.find("{"); end = raw.rfind("}")
+    if start == -1 or end == -1:
+        raise ValueError("No JSON object found in LLM response.")
+    return json.loads(raw[start:end+1])
+
+# ---------- CONTEXT INGEST (PDF/DOCX/TXT) ----------
 from pypdf import PdfReader
 from docx import Document as DocxDocument
 from rapidfuzz import fuzz
@@ -110,48 +60,122 @@ def pick_top_snippets(texts, query, k=8):
     scored.sort(key=lambda x: x[1], reverse=True)
     return [c for c, s in scored[:k] if s > 40]
 
-# ---------- Safe slide creation helper ----------
-def safe_add_slide(prs, layout_idx=0):
-    try:
-        layout = prs.slide_layouts[layout_idx]
-    except:
-        # fallback to default presentation layout if template is broken
-        tmp = Presentation()
-        layout = tmp.slide_layouts[0]
-    return prs.slides.add_slide(layout)
+# ---------- TABLE FILL HELPERS ----------
+def _find_table(prs, table_name="INIT_TABLE"):
+    """Find table by name; if not found, try header match."""
+    # 1) By exact shape name
+    for slide in prs.slides:
+        for sh in slide.shapes:
+            if getattr(sh, "name", "") == table_name and hasattr(sh, "table"):
+                return sh
+            if hasattr(sh, "shapes"):
+                for s in sh.shapes:
+                    if getattr(s, "name", "") == table_name and hasattr(s, "table"):
+                        return s
+    # 2) Fallback by header match
+    expected_headers = ["Initiative","Step","Success criteria","Owner","Target","Status"]
+    for slide in prs.slides:
+        for sh in slide.shapes:
+            if hasattr(sh, "table"):
+                tbl = sh.table
+                if len(tbl.columns) >= 6 and len(tbl.rows) >= 1:
+                    headers = [tbl.cell(0, c).text.strip() for c in range(6)]
+                    if headers == expected_headers:
+                        return sh
+    return None
 
-# ---------- APP UI ----------
-st.markdown("## 📘 Outcome-Based Customer Success Plan — Robust Generator")
-st.caption("Fill the form, (optionally) upload context + a PPT template, and download a polished deck.")
+def fill_initiatives_table(prs, initiatives, table_name="INIT_TABLE"):
+    """
+    Fills a 6-col table with 9 rows (+ header) for 3 initiatives × 3 steps.
+    Columns: [Initiative, Step, Success criteria, Owner, Target, Status]
+    Merges Initiative & Success criteria cells across each 3-row block if possible.
+    """
+    shp = _find_table(prs, table_name)
+    if shp is None or not hasattr(shp, "table"):
+        return False
+    tbl = shp.table
 
-with st.form("obsp"):
+    # Basic checks
+    if len(tbl.columns) < 6 or len(tbl.rows) < 10:
+        return False
+    if len(initiatives) != 3:
+        return False
+
+    # Clear data rows
+    for r in range(1, len(tbl.rows)):
+        for c in range(6):
+            tbl.cell(r, c).text = ""
+
+    row_idx = 1
+    for init in initiatives:
+        name = init.get("name","")
+        crit = init.get("success_criteria","")
+        steps = init.get("steps", [])[:3]
+        if len(steps) < 3:
+            steps += [{"name":"TBD","owner":"TBD","target":"TBD","status":"not started"}] * (3 - len(steps))
+
+        start = row_idx
+        for step in steps:
+            tbl.cell(row_idx, 1).text = step.get("name","")
+            tbl.cell(row_idx, 3).text = step.get("owner","")
+            tbl.cell(row_idx, 4).text = step.get("target","")
+            tbl.cell(row_idx, 5).text = step.get("status","not started")
+            row_idx += 1
+        end = row_idx - 1
+
+        # Merge & fill Initiative
+        try:
+            tbl.cell(start, 0).merge(tbl.cell(end, 0))
+        except:  # already merged or not supported
+            pass
+        tbl.cell(start, 0).text = name
+
+        # Merge & fill Success criteria
+        try:
+            tbl.cell(start, 2).merge(tbl.cell(end, 2))
+        except:
+            pass
+        tbl.cell(start, 2).text = crit
+
+    return True
+
+# ---------- UI ----------
+st.markdown("## 🧩 Initiatives Slide Filler")
+st.caption("Upload your PPT template (with a 6-col table named INIT_TABLE), upload context (QBR/notes), and I’ll auto-fill 3 initiatives × 3 steps.")
+
+with st.form("form"):
     col1, col2 = st.columns(2)
     customer = col1.text_input("Customer", "Acme Corp")
-    industry = col2.text_input("Industry", "SaaS - HR Tech")
+    industry = col2.text_input("Industry", "Manufacturing")
     arr = col1.text_input("ARR Segment", "$1–5M ARR")
     horizon = col2.text_input("Time Horizon", "12 months")
 
-    objectives = st.text_area("Customer Outcomes (comma-separated)", "Reduce onboarding time by 20%, Improve compliance accuracy")
-    baselines  = st.text_area("Baselines (e.g., NPS=45, Adoption=60%)", "NPS=45, 315 active users, WAU=68%")
-    constraints = st.text_area("Constraints", "Limited training resources; integration backlog")
-    stakeholders = st.text_area("Stakeholders", "CFO (Exec Sponsor), HR Systems Lead (Admin), Payroll Manager (Champion)")
-    risks = st.text_area("Known Risks", "Analytics adoption lagging; renewal in 6 months")
+    objectives = st.text_area("Top objectives (comma-separated)", "Reduce onboarding time by 20%, Improve compliance accuracy, Grow analytics adoption")
+    baselines  = st.text_area("Baselines / current state", "NPS=45; 315 active users; WAU=68%; Analytics adoption=32%")
+    constraints = st.text_area("Constraints", "Limited training resources; reliance on vendor workshops")
+    stakeholders = st.text_area("Stakeholders", "CFO (sponsor); HR Systems Lead (admin); Analytics Lead (champion)")
+    risks = st.text_area("Known risks", "Adoption resistance; renewal in 6 months requires ROI proof")
 
     uploads = st.file_uploader(
-        "Upload context files (QBRs, notes, SOWs) — PDF, DOCX, or TXT (optional)",
-        type=["pdf","docx","txt"], accept_multiple_files=True
+        "Upload context files (PDF / DOCX / TXT) — optional",
+        type=["pdf", "docx", "txt"], accept_multiple_files=True
     )
     ppt_template = st.file_uploader(
-        "Optional: Upload a PowerPoint template (.pptx) to apply your brand/theme",
+        "Upload your PPT template (.pptx) with table named INIT_TABLE",
         type=["pptx"], accept_multiple_files=False
     )
 
     model = st.selectbox("Model", ["gpt-4o-mini","gpt-4o","gpt-4-turbo","gpt-3.5-turbo"], index=0)
-    submitted = st.form_submit_button("Generate Plan")
+    submitted = st.form_submit_button("Generate Initiatives & Fill Slide")
 
 if submitted:
-    # Gather context snippets
-    query = f"{customer} {industry} {arr} {horizon} Objectives: {objectives} Baselines: {baselines}"
+    # Require a template
+    if ppt_template is None:
+        st.error("Please upload a PPTX template with a table named INIT_TABLE.")
+        st.stop()
+
+    # Gather context
+    query = f"{customer} {industry} {arr} {horizon} Objectives: {objectives} Baselines: {baselines} Constraints: {constraints}"
     all_texts = []
     for f in (uploads or []):
         try:
@@ -161,82 +185,80 @@ if submitted:
     snippets = pick_top_snippets(all_texts, query, k=8)
     context_blob = "\n\n---\n\n".join(snippets)[:8000]
 
-    # Prompt
-    system = "You output STRICT JSON for a robust customer success plan. No markdown, no extra prose."
+    # Ask model for exactly 3 initiatives × 3 steps (STRICT JSON)
+    system = "You output STRICT JSON only. No markdown or extra text."
     user = f"""
-JSON schema:
+Create exactly 3 initiatives for an HR ERP/HCM account, each with exactly 3 steps.
+Ensure each step has owner, target (e.g., Q1/Q2/Month), and status (one of: not started, in progress, completed).
+
+Return ONLY this JSON schema:
 {{
-  "cover": {{"title":"Outcome-Based Customer Success Plan — {customer}","account_meta":"Industry: {industry} | ARR: {arr} | Horizon: {horizon}"}},
-  "purpose": "Why CS plan matters...",
-  "objectives": [{", ".join([f'"{o.strip()}"' for o in objectives.split(",")])}],
-  "kpis": [{{"metric":"NPS","baseline":"{baselines}","target":"Improve vs baseline","cadence":"Monthly","owner":"CSM"}}],
-  "milestones": [
-    {{"phase":"Onboarding (0–30d)","deliverables":["Training complete","Integrations configured"]}},
-    {{"phase":"Adoption (30–90d)","deliverables":[">60% WAU","Analytics rollout"]}},
-    {{"phase":"Optimization (90–180d)","deliverables":["Advanced features live"]}},
-    {{"phase":"Renewal Prep (180–365d)","deliverables":["ROI case study","Exec QBR"]}}
-  ],
-  "roles_vendor":["CSM — outcomes","SE — integrations","Support — resolution"],
-  "roles_customer":["CFO — sponsor","HR Lead — admin","Payroll Mgr — champion"],
-  "risks":[{{"risk":"Low adoption","mitigation":"Exec sponsor + champion"}}],
-  "governance":"Weekly status, monthly steering, quarterly exec QBR."
+  "initiatives": [
+    {{
+      "name": "short title",
+      "success_criteria": "1-2 sentences, measurable",
+      "steps": [
+        {{"name":"specific step","owner":"role/person","target":"Q1/Q2/Month","status":"not started|in progress|completed"}},
+        {{"name":"specific step","owner":"role/person","target":"Q1/Q2/Month","status":"not started|in progress|completed"}},
+        {{"name":"specific step","owner":"role/person","target":"Q1/Q2/Month","status":"not started|in progress|completed"}}
+      ]
+    }},
+    {{
+      "name":"...",
+      "success_criteria":"...",
+      "steps":[ ...3 items... ]
+    }},
+    {{
+      "name":"...",
+      "success_criteria":"...",
+      "steps":[ ...3 items... ]
+    }}
+  ]
 }}
 
-Context:
+Account context:
+Customer: {customer}
+Industry: {industry}
+ARR: {arr}
+Horizon: {horizon}
+Objectives: {objectives}
+Baselines: {baselines}
+Constraints: {constraints}
+Stakeholders: {stakeholders}
+Risks: {risks}
+
+Relevant uploaded excerpts (paraphrase succinctly):
 {context_blob}
 """
     try:
         raw = call_llm(system, user, model)
         data = extract_json(raw)
     except Exception as e:
-        st.error(f"Could not create plan. {e}")
+        st.error(f"Could not generate initiatives. {e}")
         st.stop()
 
-    # Load PPT (safe fallback if template is broken)
+    # Load template
     try:
-        prs = Presentation(ppt_template) if ppt_template is not None else Presentation()
+        prs = Presentation(ppt_template)
         if not prs.slide_layouts:
             raise ValueError("Template has no layouts")
     except Exception as e:
-        st.warning(f"Template invalid ({e}), using default.")
-        prs = Presentation()
+        st.error(f"Could not load template: {e}")
+        st.stop()
 
-    # Build slides safely
-    s = safe_add_slide(prs, 0)
-    add_title(s, data["cover"]["title"])
-    s.placeholders[1].text = data["cover"]["account_meta"]
+    # Fill the table
+    ok = fill_initiatives_table(prs, data.get("initiatives", []), table_name="INIT_TABLE")
+    if not ok:
+        st.error("Could not find/fill the table. Check it's named 'INIT_TABLE', has 6 columns, and 10 rows (header + 9).")
+        st.stop()
 
-    s = safe_add_slide(prs, 1)
-    add_title(s, "Purpose")
-    add_body(s, data.get("purpose",""))
-
-    s = safe_add_slide(prs, 1)
-    add_title(s, "Objectives")
-    add_bullets(s, data.get("objectives", []))
-
-    s = safe_add_slide(prs, 1)
-    add_title(s, "KPIs")
-    add_kpi_table(s, data.get("kpis", []))
-
-    s = safe_add_slide(prs, 1)
-    add_title(s, "Milestones")
-    lines = [f"{m.get('phase','')}: " + "; ".join(m.get('deliverables',[])) for m in data.get("milestones",[])]
-    add_bullets(s, lines)
-
-    s = safe_add_slide(prs, 1)
-    add_title(s, "Roles & Responsibilities")
-    add_two_col_table(s, "Vendor Team", data.get("roles_vendor", []), "Customer Team", data.get("roles_customer", []))
-
-    s = safe_add_slide(prs, 1)
-    add_title(s, "Risks & Mitigation")
-    risk_lines = [f"{r.get('risk','')} — Mitigation: {r.get('mitigation','')}" for r in data.get("risks",[])]
-    add_bullets(s, risk_lines)
-
-    s = safe_add_slide(prs, 1)
-    add_title(s, "Engagement & Governance")
-    add_body(s, data.get("governance",""))
-
-    buf = io.BytesIO(); prs.save(buf); buf.seek(0)
-    st.success("Plan generated!")
-    st.download_button("⬇️ Download PowerPoint", buf, file_name=f"OBSP_{customer.replace(' ','_')}.pptx",
-                       mime="application/vnd.openxmlformats-officedocument.presentationml.presentation")
+    # Save+download
+    buf = io.BytesIO()
+    prs.save(buf); buf.seek(0)
+    st.success("Slide filled!")
+    st.download_button(
+        "⬇️ Download Updated PowerPoint",
+        buf,
+        file_name=f"Initiatives_{customer.replace(' ','_')}.pptx",
+        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    )
