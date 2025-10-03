@@ -1,15 +1,17 @@
-import io, os, json, re
+import io, os, json
 import streamlit as st
 from pptx import Presentation
 from pptx.util import Pt
 from pptx.dml.color import RGBColor
 
-# ---------- PAGE CONFIG ----------
+# ---------- PAGE CONFIG MUST BE FIRST STREAMLIT CALL ----------
 st.set_page_config(page_title="OBSP Generator", page_icon="📘", layout="centered")
+
 PRIMARY = RGBColor(30, 64, 175)
 BODY_SIZE = 18
 TITLE_SIZE = 36
 
+# ---------- UI HELPERS ----------
 def add_title(slide, text):
     title = slide.shapes.title
     title.text = text
@@ -53,20 +55,26 @@ def add_two_col_table(slide, left_title, left_items, right_title, right_items):
         table.cell(i,0).text = left_items[i-1] if i-1 < len(left_items) else ""
         table.cell(i,1).text = right_items[i-1] if i-1 < len(right_items) else ""
 
-def extract_json(raw):
-    # robustly grab the first {...} block
+def extract_json(raw: str):
     start = raw.find("{"); end = raw.rfind("}")
-    if start == -1 or end == -1: raise ValueError("No JSON in response")
+    if start == -1 or end == -1:
+        raise ValueError("No JSON object found in LLM response.")
     return json.loads(raw[start:end+1])
 
 def call_llm(system, user, model):
+    # Ensure API key exists before attempting call
+    if "OPENAI_API_KEY" not in st.secrets or not st.secrets["OPENAI_API_KEY"]:
+        raise RuntimeError("Missing OPENAI_API_KEY secret. Add it in Streamlit Cloud → App → Settings → Secrets.")
     from openai import OpenAI
     client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
     resp = client.chat.completions.create(
-        model=model, messages=[{"role":"system","content":system},{"role":"user","content":user}], temperature=0.2
+        model=model,
+        messages=[{"role":"system","content":system},{"role":"user","content":user}],
+        temperature=0.2,
     )
     return resp.choices[0].message.content
 
+# ---------- APP UI ----------
 st.markdown("## 📘 Outcome-Based Success Plan (OBSP) Generator")
 st.caption("Fill the form and generate a polished PowerPoint plan.")
 
@@ -87,7 +95,7 @@ with st.form("obsp"):
     submitted = st.form_submit_button("Generate Plan")
 
 if submitted:
-    system = "You output STRICT JSON for customer success plans. No markdown."
+    system = "You output STRICT JSON for customer success plans. No markdown, no extra prose."
     user = f"""
 JSON schema:
 {{
@@ -121,18 +129,21 @@ Known Risks: {risks}
         raw = call_llm(system, user, model)
         data = extract_json(raw)
     except Exception as e:
-        st.error(f"Could not parse model response as JSON. Try a different model or re-run. Error: {e}")
+        st.error(f"Could not create plan. {e}")
         st.stop()
 
-    # Build PPT
+    # ---------- Build PPT ----------
     prs = Presentation()
+
     # Title
     s = prs.slides.add_slide(prs.slide_layouts[0])
-    add_title(s, f"Outcome-Based Success Plan — {customer}")
+    title = s.shapes.title
+    title.text = f"Outcome-Based Success Plan — {customer}"
+    p = title.text_frame.paragraphs[0]; p.font.size = Pt(TITLE_SIZE); p.font.bold = True; p.font.color.rgb = PRIMARY
     s.placeholders[1].text = f"Industry: {industry}  |  ARR: {arr}\nHorizon: {horizon}"
     for p in s.placeholders[1].text_frame.paragraphs: p.font.size = Pt(18)
 
-    # Exec
+    # Exec Summary
     s = prs.slides.add_slide(prs.slide_layouts[1])
     add_title(s, "1. Executive Summary")
     add_body(s, data.get("exec_summary",""))
@@ -169,23 +180,28 @@ Known Risks: {risks}
     add_title(s, "7. Engagement & Governance")
     add_body(s, data.get("governance",""))
 
-    buf = io.BytesIO()
-    prs.save(buf); buf.seek(0)
+    buf = io.BytesIO(); prs.save(buf); buf.seek(0)
     st.success("Plan generated!")
-    st.download_button("⬇️ Download PowerPoint", buf, file_name=f"OBSP_{customer.replace(' ','_')}.pptx",
-                       mime="application/vnd.openxmlformats-officedocument.presentationml.presentation")
-import io, os, json, re
+    st.download_button(
+        "⬇️ Download PowerPoint",
+        buf,
+        file_name=f"OBSP_{customer.replace(' ','_')}.pptx",
+        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    )
+import io, os, json
 import streamlit as st
 from pptx import Presentation
 from pptx.util import Pt
 from pptx.dml.color import RGBColor
 
-# ---------- PAGE CONFIG ----------
+# ---------- PAGE CONFIG MUST BE FIRST STREAMLIT CALL ----------
 st.set_page_config(page_title="OBSP Generator", page_icon="📘", layout="centered")
+
 PRIMARY = RGBColor(30, 64, 175)
 BODY_SIZE = 18
 TITLE_SIZE = 36
 
+# ---------- UI HELPERS ----------
 def add_title(slide, text):
     title = slide.shapes.title
     title.text = text
@@ -229,20 +245,26 @@ def add_two_col_table(slide, left_title, left_items, right_title, right_items):
         table.cell(i,0).text = left_items[i-1] if i-1 < len(left_items) else ""
         table.cell(i,1).text = right_items[i-1] if i-1 < len(right_items) else ""
 
-def extract_json(raw):
-    # robustly grab the first {...} block
+def extract_json(raw: str):
     start = raw.find("{"); end = raw.rfind("}")
-    if start == -1 or end == -1: raise ValueError("No JSON in response")
+    if start == -1 or end == -1:
+        raise ValueError("No JSON object found in LLM response.")
     return json.loads(raw[start:end+1])
 
 def call_llm(system, user, model):
+    # Ensure API key exists before attempting call
+    if "OPENAI_API_KEY" not in st.secrets or not st.secrets["OPENAI_API_KEY"]:
+        raise RuntimeError("Missing OPENAI_API_KEY secret. Add it in Streamlit Cloud → App → Settings → Secrets.")
     from openai import OpenAI
     client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
     resp = client.chat.completions.create(
-        model=model, messages=[{"role":"system","content":system},{"role":"user","content":user}], temperature=0.2
+        model=model,
+        messages=[{"role":"system","content":system},{"role":"user","content":user}],
+        temperature=0.2,
     )
     return resp.choices[0].message.content
 
+# ---------- APP UI ----------
 st.markdown("## 📘 Outcome-Based Success Plan (OBSP) Generator")
 st.caption("Fill the form and generate a polished PowerPoint plan.")
 
@@ -263,7 +285,7 @@ with st.form("obsp"):
     submitted = st.form_submit_button("Generate Plan")
 
 if submitted:
-    system = "You output STRICT JSON for customer success plans. No markdown."
+    system = "You output STRICT JSON for customer success plans. No markdown, no extra prose."
     user = f"""
 JSON schema:
 {{
@@ -297,18 +319,21 @@ Known Risks: {risks}
         raw = call_llm(system, user, model)
         data = extract_json(raw)
     except Exception as e:
-        st.error(f"Could not parse model response as JSON. Try a different model or re-run. Error: {e}")
+        st.error(f"Could not create plan. {e}")
         st.stop()
 
-    # Build PPT
+    # ---------- Build PPT ----------
     prs = Presentation()
+
     # Title
     s = prs.slides.add_slide(prs.slide_layouts[0])
-    add_title(s, f"Outcome-Based Success Plan — {customer}")
+    title = s.shapes.title
+    title.text = f"Outcome-Based Success Plan — {customer}"
+    p = title.text_frame.paragraphs[0]; p.font.size = Pt(TITLE_SIZE); p.font.bold = True; p.font.color.rgb = PRIMARY
     s.placeholders[1].text = f"Industry: {industry}  |  ARR: {arr}\nHorizon: {horizon}"
     for p in s.placeholders[1].text_frame.paragraphs: p.font.size = Pt(18)
 
-    # Exec
+    # Exec Summary
     s = prs.slides.add_slide(prs.slide_layouts[1])
     add_title(s, "1. Executive Summary")
     add_body(s, data.get("exec_summary",""))
@@ -345,8 +370,11 @@ Known Risks: {risks}
     add_title(s, "7. Engagement & Governance")
     add_body(s, data.get("governance",""))
 
-    buf = io.BytesIO()
-    prs.save(buf); buf.seek(0)
+    buf = io.BytesIO(); prs.save(buf); buf.seek(0)
     st.success("Plan generated!")
-    st.download_button("⬇️ Download PowerPoint", buf, file_name=f"OBSP_{customer.replace(' ','_')}.pptx",
-                       mime="application/vnd.openxmlformats-officedocument.presentationml.presentation")
+    st.download_button(
+        "⬇️ Download PowerPoint",
+        buf,
+        file_name=f"OBSP_{customer.replace(' ','_')}.pptx",
+        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    )
