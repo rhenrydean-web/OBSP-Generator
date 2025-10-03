@@ -258,8 +258,8 @@ def pretty_format_init_table(prs, table_shape, max_pt=13, widths=None):
                 _fallback_shrink(cell.text_frame, hard_min_pt=9)
 
 # ---------- UI ----------
-st.markdown("## 🧩 Initiatives Slide Filler")
-st.caption("Upload your PPT template (with a 6-col table named INIT_TABLE), upload context (QBR/notes), and I’ll auto-fill 3 initiatives × 3 steps — with autoshrink and slide-fit formatting.")
+st.markdown("## 🧩 Outcome Based Success Plans")
+st.caption("Upload your PPT template (with a 6-col table named INIT_TABLE), upload context (QBR/notes), and I’ll auto-fill 3 initiatives × 3 steps!")
 
 with st.form("form"):
     col1, col2 = st.columns(2)
